@@ -1,182 +1,103 @@
+# Serverless GenAI Fine-Tuning & Deployment Pipeline on AWS
+
+An end-to-end MLOps/LLMOps project demonstrating fine-tuning, serverless inference, and monitoring for a large language model on AWS — built as a portfolio piece for GenAI/LLMOps roles.
+
+## Overview
+
+This project fine-tunes **microsoft/Phi-3-mini-4k-instruct** using **LoRA/QLoRA** on Amazon SageMaker, then deploys the resulting model behind a fully serverless, production-style inference stack (API Gateway → Lambda → SageMaker endpoint), with request/response logging to DynamoDB for observability.
+
+It covers the full lifecycle a GenAI/LLMOps engineer is expected to own:
+
+- Data preparation and fine-tuning
+- Custom model packaging for an unsupported architecture
+- Cloud deployment and infrastructure wiring
+- Logging and monitoring
+- Cost-aware validation and cleanup
+
+## Architecture
+
+```
+Client
+  │
+  ▼
+API Gateway  ──►  AWS Lambda  ──►  SageMaker Real-Time Endpoint (ml.g5.xlarge)
+                       │
+                       ▼
+                  DynamoDB (request/response logs)
+```
+
+- **Fine-tuning**: SageMaker Training Job (LoRA/QLoRA) on the Dolly-15k dataset
+- **Inference**: SageMaker real-time GPU endpoint with a custom `inference.py`
+- **API layer**: API Gateway + Lambda as a lightweight invocation/orchestration layer
+- **Observability**: DynamoDB table logging every request and response for auditability
+
+*(Insert architecture diagram image here — e.g. `docs/architecture.png`)*
+
+## Tech Stack
+
+| Layer | Tools |
+|---|---|
+| Model | `microsoft/Phi-3-mini-4k-instruct` |
+| Fine-tuning | Hugging Face `transformers`, `peft`, `trl`, LoRA/QLoRA |
+| Dataset | `databricks/databricks-dolly-15k` |
+| Training/Hosting | Amazon SageMaker (`ml.g5.xlarge`) |
+| API | AWS Lambda, API Gateway |
+| Logging | Amazon DynamoDB |
+| IAM/Infra | AWS IAM, S3 |
+| Dev environment | Windows, Miniconda, VS Code, Jupyter |
+| Region | `ap-south-1` (Mumbai) |
+
+## Key Engineering Challenges & Solutions
+
+Fine-tuning and deploying Phi-3 on SageMaker surfaced several non-obvious issues, each of which required a targeted fix:
+
+1. **LoRA target modules differ by architecture**
+   Phi-3 uses a fused QKV attention layout, so LoRA must target `["qkv_proj", "o_proj"]` instead of the Llama-style `["q_proj", "v_proj"]`.
+
+2. **Gradient checkpointing + PEFT compatibility**
+   Enabling gradient checkpointing with a PEFT-wrapped model requires explicitly calling `model.enable_input_require_grads()` after `get_peft_model()`, or gradients silently fail to flow to the LoRA adapters.
+
+3. **TRL API versioning**
+   Newer versions of `trl` moved `max_seq_length` and related training params from `TrainingArguments` into `SFTConfig`.
+
+4. **IAM permissions boundary gotcha**
+   A permissions boundary scoped to `AmazonS3FullAccess` silently blocked ECR image pulls during endpoint deployment, even though broader policies were attached to the role. Fixed via `iam.delete_role_permissions_boundary()`.
+
+5. **Custom inference handler required**
+   SageMaker's default Hugging Face Inference Toolkit doesn't support Phi-3's architecture out of the box. A custom `inference.py` with explicit `model_fn` / `predict_fn` was written and bundled under a `code/` subfolder, referenced via the `SAGEMAKER_PROGRAM` and `SAGEMAKER_SUBMIT_DIRECTORY` environment variables.
+
+6. **Transformers API drift**
+   `DynamicCache.get_max_length` was renamed in newer `transformers` releases. Resolved with a monkey-patch: `DynamicCache.get_max_length = DynamicCache.get_max_cache_shape`.
+
+7. **SageMaker SDK v3 breaking change**
+   The `HuggingFace` estimator import broke under SageMaker SDK v3.21.0+. Pinned to `sagemaker<3.0.0` for stability.
+
+## Cost-Conscious Validation Pattern
+
+Given the cost of GPU endpoints, this project follows a **validate-first** approach: before deploying any live endpoint, inference logic is first run and verified as a cheap SageMaker training/processing job. This fails fast on packaging or code errors without incurring sustained GPU endpoint costs.
+
+## Project Lifecycle
+
+1. **Data prep** — Load and format the Dolly-15k dataset for instruction fine-tuning
+2. **Fine-tuning** — LoRA/QLoRA training job on SageMaker
+3. **Validation** — Cheap dry-run of inference logic as a training/processing job
+4. **Deployment** — Real-time SageMaker endpoint (`ml.g5.xlarge`) with custom inference code
+5. **API layer** — Lambda function wired to API Gateway for external invocation
+6. **Logging** — DynamoDB table capturing every inference request/response
+7. **Cleanup** — Manual teardown of billable resources via the AWS Console to stop ongoing charges
+
+
+## Status
+
+✅ Fine-tuning complete
+✅ Endpoint deployed and tested end-to-end
+✅ Logging pipeline verified
+✅ AWS resources torn down to stop billing (endpoint, GPU instances, and associated resources removed post-demo)
+
+> Note: The live endpoint is not currently running to avoid ongoing GPU costs.
+
+
 ---
-base_model: microsoft/Phi-3-mini-4k-instruct
-library_name: peft
----
 
-# Model Card for Model ID
-
-<!-- Provide a quick summary of what the model is/does. -->
-
-
-
-### Model Sources [optional]
-
-
-
-## Uses
-
-<!-- Address questions around how the model is intended to be used, including the foreseeable users of the model and those affected by the model. -->
-
-### Direct Use
-
-<!-- This section is for the model use without fine-tuning or plugging into a larger ecosystem/app. -->
-
-[More Information Needed]
-
-### Downstream Use [optional]
-
-<!-- This section is for the model use when fine-tuned for a task, or when plugged into a larger ecosystem/app -->
-
-[More Information Needed]
-
-### Out-of-Scope Use
-
-<!-- This section addresses misuse, malicious use, and uses that the model will not work well for. -->
-
-[More Information Needed]
-
-## Bias, Risks, and Limitations
-
-<!-- This section is meant to convey both technical and sociotechnical limitations. -->
-
-[More Information Needed]
-
-### Recommendations
-
-<!-- This section is meant to convey recommendations with respect to the bias, risk, and technical limitations. -->
-
-Users (both direct and downstream) should be made aware of the risks, biases and limitations of the model. More information needed for further recommendations.
-
-## How to Get Started with the Model
-
-Use the code below to get started with the model.
-
-[More Information Needed]
-
-## Training Details
-
-### Training Data
-
-<!-- This should link to a Dataset Card, perhaps with a short stub of information on what the training data is all about as well as documentation related to data pre-processing or additional filtering. -->
-
-[More Information Needed]
-
-### Training Procedure
-
-<!-- This relates heavily to the Technical Specifications. Content here should link to that section when it is relevant to the training procedure. -->
-
-#### Preprocessing [optional]
-
-[More Information Needed]
-
-
-#### Training Hyperparameters
-
-- **Training regime:** [More Information Needed] <!--fp32, fp16 mixed precision, bf16 mixed precision, bf16 non-mixed precision, fp16 non-mixed precision, fp8 mixed precision -->
-
-#### Speeds, Sizes, Times [optional]
-
-<!-- This section provides information about throughput, start/end time, checkpoint size if relevant, etc. -->
-
-[More Information Needed]
-
-## Evaluation
-
-<!-- This section describes the evaluation protocols and provides the results. -->
-
-### Testing Data, Factors & Metrics
-
-#### Testing Data
-
-<!-- This should link to a Dataset Card if possible. -->
-
-[More Information Needed]
-
-#### Factors
-
-<!-- These are the things the evaluation is disaggregating by, e.g., subpopulations or domains. -->
-
-[More Information Needed]
-
-#### Metrics
-
-<!-- These are the evaluation metrics being used, ideally with a description of why. -->
-
-[More Information Needed]
-
-### Results
-
-[More Information Needed]
-
-#### Summary
-
-
-
-## Model Examination [optional]
-
-<!-- Relevant interpretability work for the model goes here -->
-
-[More Information Needed]
-
-## Environmental Impact
-
-<!-- Total emissions (in grams of CO2eq) and additional considerations, such as electricity usage, go here. Edit the suggested text below accordingly -->
-
-Carbon emissions can be estimated using the [Machine Learning Impact calculator](https://mlco2.github.io/impact#compute) presented in [Lacoste et al. (2019)](https://arxiv.org/abs/1910.09700).
-
-- **Hardware Type:** [More Information Needed]
-- **Hours used:** [More Information Needed]
-- **Cloud Provider:** [More Information Needed]
-- **Compute Region:** [More Information Needed]
-- **Carbon Emitted:** [More Information Needed]
-
-## Technical Specifications [optional]
-
-### Model Architecture and Objective
-
-[More Information Needed]
-
-### Compute Infrastructure
-
-[More Information Needed]
-
-#### Hardware
-
-[More Information Needed]
-
-#### Software
-
-[More Information Needed]
-
-## Citation [optional]
-
-<!-- If there is a paper or blog post introducing the model, the APA and Bibtex information for that should go in this section. -->
-
-**BibTeX:**
-
-[More Information Needed]
-
-**APA:**
-
-[More Information Needed]
-
-## Glossary [optional]
-
-<!-- If relevant, include terms and calculations in this section that can help readers understand the model or model card. -->
-
-[More Information Needed]
-
-## More Information [optional]
-
-[More Information Needed]
-
-## Model Card Authors [optional]
-
-[More Information Needed]
-
-## Model Card Contact
-
-[More Information Needed]
-### Framework versions
-
-- PEFT 0.14.0
+**Author**: Shubham
+**Purpose**: Portfolio project demonstrating end-to-end GenAI/LLMOps competency on AWS
