@@ -31,7 +31,7 @@ API Gateway  ──►  AWS Lambda  ──►  SageMaker Real-Time Endpoint (ml.
 - **API layer**: API Gateway + Lambda as a lightweight invocation/orchestration layer
 - **Observability**: DynamoDB table logging every request and response for auditability
 
-*(Insert architecture diagram image here — e.g. `docs/architecture.png`)*
+
 
 ## Tech Stack
 
